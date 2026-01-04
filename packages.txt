@@ -1,3 +1,0 @@
-llvm
-llvm-dev
-libllvm14
