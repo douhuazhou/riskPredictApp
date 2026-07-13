@@ -6,14 +6,14 @@ import shap
 import numpy as np
 import os
 import tempfile
-from typing import Tuple
+from typing import Tuple, Any
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
 from streamlit.components.v1 import html as st_html
+from catboost import CatBoostClassifier
 import time
 
 # Type definitions
-SklearnModel = RandomForestClassifier
+SklearnModel = Any  # 兼容 RandomForest / CatBoost 等多种模型
 SklearnScaler = StandardScaler
 
 # ---------------------------
@@ -26,14 +26,12 @@ st.set_page_config(
     )
 st.title("🏥 28-day Mortality Risk Prediction of Sepsis Patients")
 
-# 在页面开头添加自定义CSS（放在st.set_page_config之后）
+# 自定义 CSS
 st.markdown("""
     <style>
-        /* 隐藏expander的折叠箭头 */
         div[data-testid="stExpander"] > div:first-child > div:first-child > svg {
             display: none;
         }
-        /* 调整expander标题样式，接近popover */
         div[data-testid="stExpander"] > div:first-child > div:first-child {
             font-weight: 600;
             font-size: 16px;
@@ -42,23 +40,33 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-numeric_features = ['admission_age', 'sofa', 'SII', 'NLR', 'NAR',  'MLR', 'APAR', 'creatinine', 'bun', 'pt']
+# --------- 11 features (加入 PLR) ---------
+numeric_features = [
+    'admission_age', 'sofa', 'SII', 'NLR', 'PLR',
+    'NAR', 'MLR', 'APAR', 'creatinine', 'bun', 'pt'
+]
 
-## scaled background data
+# scaled background data
 background_data = pd.read_csv("background_data.csv", encoding="GBK")
-bk_data_with_features = background_data[['admission_age', 'sofa', 'SII', 'NLR', 'NAR',  'MLR', 'APAR', 'creatinine', 'bun', 'pt']]
+bk_data_with_features = background_data[numeric_features]
 
-# dedinition of COMPOSITE INDICATORS（sub features and calculation formula）
+
+# --------- COMPOSITE INDICATORS (新增 PLR) ---------
 COMPOSITE_INDICATORS = {
     "SII": {
-        "sub_features": ["Plt", "Neu", "Lym"], # sub feature of SII
+        "sub_features": ["Plt", "Neu", "Lym"],
         "formula": lambda p, n, l: p * n / l if l != 0 else 0.0,
-        "default_values": [440.0, 4.347, 1.323]  # default value of sub feature
+        "default_values": [440.0, 4.347, 1.323]
     },
     "NLR": {
         "sub_features": ["Neu", "Lym"],
         "formula": lambda n, l: n / l if l != 0 else 0.0,
         "default_values": [4.347, 1.323]
+    },
+    "PLR": {
+        "sub_features": ["Plt", "Lym"],
+        "formula": lambda p, l: p / l if l != 0 else 0.0,
+        "default_values": [440.0, 1.323]
     },
     "NAR": {
         "sub_features": ["Neu", "Alb"],
@@ -77,31 +85,34 @@ COMPOSITE_INDICATORS = {
     }
 }
 
+
 # ---------------------------
 # initialize Session State
 # ---------------------------
 def init_session_state():
-    # initialize composite indicators（SII、NLR...）
-    if "SII_value" not in st.session_state:
-        st.session_state["SII_value"] = 1445.714286  # initialize default value
-    if "NLR_value" not in st.session_state:
-        st.session_state["NLR_value"] = 3.285714286  # initialize default value
-    if "NAR_value" not in st.session_state:
-        st.session_state["NAR_value"] = 0.15525  # initialize default value
-    if "MLR_value" not in st.session_state:
-        st.session_state["MLR_value"] = 0.142857143  # initialize default value
-    if "APAR_value" not in st.session_state:
-        st.session_state["APAR_value"] = 1.25  # initialize default value
-    
-    # initialize sub feature value
+    # 6 个复合指标的默认值
+    defaults = {
+        "SII_value": 1445.714286,
+        "NLR_value": 3.285714286,
+        "PLR_value": 332.6076,   # 440 / 1.323
+        "NAR_value": 0.15525,
+        "MLR_value": 0.142857143,
+        "APAR_value": 1.25,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    # 子特征
     for indicator, info in COMPOSITE_INDICATORS.items():
         for sub_feat, default_val in zip(info["sub_features"], info["default_values"]):
             key = f"{indicator}_{sub_feat}_value"
             if key not in st.session_state:
                 st.session_state[key] = default_val
 
-# initialize session
+
 init_session_state()
+
 
 def ensure_reduced_scaler():
     full_scaler_path = "model/scaler.pkl"
@@ -120,22 +131,51 @@ def ensure_reduced_scaler():
         scaler_reduced.feature_names_in_ = np.array(selected_features, dtype=object)
 
         joblib.dump(scaler_reduced, reduced_scaler_path)
-        print("✅ Reduced scaler created and saved.")
+        print("Reduced scaler created and saved.")
 
-@st.cache_resource(show_spinner="Loading prediction model and scaler...")  # loading indication
+
+@st.cache_resource(show_spinner="Loading prediction model and scaler...")
 def load_model_and_scaler():
     """Load model and scaler"""
     try:
         model_dir = "model"
-        model = joblib.load(os.path.join(model_dir, "rf_model.pkl"))
+        model_file = "cb_model.pkl"
+        model = joblib.load(os.path.join(model_dir, model_file))
         scaler = joblib.load(os.path.join(model_dir, "scaler_reduced.pkl"))
+
+        # 校验模型特征集与 UI 一致
+        mf = getattr(model, "feature_names_in_", None) or getattr(model, "feature_names_", None)
+        if mf is not None:
+            mf = list(mf)
+            if set(mf) != set(numeric_features):
+                missing = set(numeric_features) - set(mf)
+                extra = set(mf) - set(numeric_features)
+                st.error(
+                    f"Model / UI feature mismatch (model={model_file}).\n"
+                    f"Model features ({len(mf)}): {mf}\n"
+                    f"UI features ({len(numeric_features)}): {numeric_features}\n"
+                    f"Missing in model: {missing} | Extra in model: {extra}\n"
+                )
+                st.stop()
+
+        # 校验 scaler_reduced 的特征集
+        sf = list(scaler.feature_names_in_) if hasattr(scaler, "feature_names_in_") else None
+        if sf is not None and set(sf) != set(numeric_features):
+            st.error(
+                f"Scaler feature mismatch.\n"
+                f"Scaler features: {sf}\n"
+                f"UI features: {numeric_features}\n"
+                f"▶ 请删除 model/scaler_reduced.pkl 重新生成。"
+            )
+            st.stop()
+
         return model, scaler
     except Exception as e:
         st.error(f"Initialization failed: {str(e)}")
         st.stop()
 
+
 def prepare_input_data(input_data: pd.DataFrame, scaler: SklearnScaler):
-    # Standardize numeric features
     temp_df = input_data[numeric_features]
     temp_df_scaled = pd.DataFrame(
         scaler.transform(temp_df.loc[:, scaler.feature_names_in_]),
@@ -145,47 +185,71 @@ def prepare_input_data(input_data: pd.DataFrame, scaler: SklearnScaler):
     input_data[numeric_features] = temp_df_scaled
     return input_data
 
+
 def make_prediction(model: SklearnModel, input_data: pd.DataFrame) -> float:
-    """Perform prediction"""
     try:
+        # 若模型有 feature_names_in_ / feature_names_，按其顺序排列
+        feat_order = getattr(model, "feature_names_in_", None)
+        if feat_order is None:
+            feat_order = getattr(model, "feature_names_", None)
+        if feat_order is not None:
+            input_data = input_data[list(feat_order)]
         return model.predict_proba(input_data)[0, 1]
     except Exception as e:
         st.error(f"Prediction failed: {str(e)}")
-        st.stop() 
+        st.stop()
+
 
 def generate_shap_plot(model: SklearnModel, input_data: pd.DataFrame) -> str:
     """Generate optimized SHAP visualization"""
     try:
         if input_data.empty:
             raise ValueError("input data for shap is empty")
-        
-        # 1. create shap explainer (KernelExplainer for any model）
-        model_feature_names = model.feature_names_in_
-        explainer = shap.KernelExplainer(lambda X: model.predict_proba(pd.DataFrame(X, columns=model_feature_names)), bk_data_with_features.head(20))
-        ## inout data target value 
+
+        # 优先使用 model.feature_names_in_ / feature_names_，否则用当前输入列
+        model_feature_names = getattr(model, "feature_names_in_", None)
+        if model_feature_names is None:
+            model_feature_names = getattr(model, "feature_names_", None)
+        if model_feature_names is None:
+            model_feature_names = input_data.columns.tolist()
+        model_feature_names = list(model_feature_names)
+
+        explainer = shap.KernelExplainer(
+            lambda X: model.predict_proba(pd.DataFrame(X, columns=model_feature_names)),
+            bk_data_with_features.head(20)
+        )
         shap_values = explainer.shap_values(input_data)
-        
-        # first sample
+
         sample_idx = 0
-        sample_shap = shap_values[0][:, 1]
+        # 兼容不同形状：list of arrays / 3D array
+        if isinstance(shap_values, list):
+            sample_shap = shap_values[1][sample_idx] if len(shap_values) == 2 else shap_values[0][sample_idx]
+            base_value = explainer.expected_value[1] if isinstance(explainer.expected_value, (list, np.ndarray)) else explainer.expected_value
+        else:
+            arr = np.asarray(shap_values)
+            if arr.ndim == 3:
+                sample_shap = arr[sample_idx][:, 1]
+                base_value = explainer.expected_value[1]
+            else:
+                sample_shap = arr[sample_idx]
+                base_value = explainer.expected_value
+
         sample_data = input_data.iloc[sample_idx]
-        
-        # generate force plot
+
         fig = shap.plots.force(
-            base_value=explainer.expected_value[1],
+            base_value=base_value,
             shap_values=sample_shap,
             features=sample_data,
             feature_names=input_data.columns.tolist(),
             matplotlib=False,
             plot_cmap="coolwarm",
-            text_rotation=15, # decrease  label rotation
+            text_rotation=15,
             figsize=(12, 6)
         )
 
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as tmp:
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False)
+        try:
             shap.save_html(tmp.name, fig)
-
             with open(tmp.name, "r", encoding="utf-8") as f:
                 html_content = f.read()
 
@@ -203,196 +267,105 @@ def generate_shap_plot(model: SklearnModel, input_data: pd.DataFrame) -> str:
             """
             html_content = html_content.replace('</head>', f'{custom_style}</head>')
             return html_content
+        finally:
+            tmp.close()
+            if os.path.exists(tmp.name):
+                try:
+                    os.remove(tmp.name)
+                except OSError:
+                    pass
     except Exception as e:
         st.error(f"SHAP plot generation failed: {str(e)}")
-        st.write("{shap_values}")
         st.stop()
-    finally:
-        if tmp.name and os.path.exists(tmp.name):
-            try:
-                os.remove(tmp.name)
-            except OSError:
-                pass
+
 
 def calculate_composite_indicator(indicator_name: str) -> None:
-    # calculate composite indicator，update Session State composite value
     if indicator_name not in COMPOSITE_INDICATORS:
         return
-    
     info = COMPOSITE_INDICATORS[indicator_name]
     sub_values = []
-    
-    # collect sub features
     for sub_feat in info["sub_features"]:
         key = f"{indicator_name}_{sub_feat}_value"
         sub_values.append(st.session_state[key])
-    
-    # calculate
     composite_value = info["formula"](*sub_values)
-
-    # time.sleep(0.05)
-
-    # update composite value
     st.session_state[f"{indicator_name}_value"] = round(composite_value, 2)
 
-def main():
-    # Ensure reduced scaler exists before loading
-    ensure_reduced_scaler()
 
-    # load model and data scaler
+def render_composite_popover(indicator: str, container):
+    """通用复合指标 popover 组件"""
+    with container:
+        # 所有按钮统一为短标签 "📝 Edit XXX"，宽度一致 → 1 行不换行
+        with st.popover(f"📝 Edit {indicator}", use_container_width=True):
+            st.markdown(f"### {indicator} Sub-indicators")
+            info = COMPOSITE_INDICATORS[indicator]
+            for sub_feat, default_val in zip(info["sub_features"], info["default_values"]):
+                key = f"{indicator}_{sub_feat}_value"
+                st.number_input(
+                    f"{sub_feat}",
+                    step=0.01,
+                    key=key,
+                    on_change=calculate_composite_indicator,
+                    args=(indicator,)
+                )
+            if st.button(f"Calculate {indicator}", key=f"calc_{indicator.lower()}"):
+                calculate_composite_indicator(indicator)
+                st.success(f"{indicator} = {st.session_state[f'{indicator}_value']}")
+
+        # 用真正的 Streamlit widget（不设 key，只传 value）：
+        # - 没 key -> 不走 session_state 缓存 -> 每次 rerun 都用最新的 value 刷新
+        # - 是真正的 widget -> Streamlit 能测量高度 -> 不会与下方按钮重叠
+        val = str(st.session_state[f"{indicator}_value"])
+        st.text_input(
+            label=f"{indicator}",
+            value=val,
+            disabled=True,
+            help=f"Click 'Edit {indicator}' popover to recalculate",
+        )
+        return val
+
+
+def main():
+    ensure_reduced_scaler()
     model, scaler = load_model_and_scaler()
 
     with st.container():
         st.subheader("Enter Patient Data")
-        # first row, five column
-        col1_row1, col2_row1, col3_row1, col4_row1, col5_row1 = st.columns(5)
-        with col1_row1:
-            age = st.number_input("Age", value=50.087269, format="%.6f")
-        with col2_row1:
+
+        # ---- Row 1: 5 basic features ----
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            age = st.number_input("Age", value=50.09, format="%.2f")
+        with c2:
             sofa = st.number_input("SOFA", value=13.0, format="%.2f")
-        with col3_row1:
+        with c3:
             Creatinine = st.number_input("Creatinine", value=1.3, format="%.2f")
-        with col4_row1:
+        with c4:
             Bun = st.number_input("Bun", value=17.0, format="%.2f")
-        with col5_row1:
-            Pt= st.number_input("Pt", value=12.5, format="%.2f")
+        with c5:
+            Pt = st.number_input("Pt", value=12.5, format="%.2f")
 
-
-        # second row, five column
-        col1_row2, col2_row2, col3_row2, col4_row2, col5_row2 = st.columns(5)
-        with col1_row2:
-            # SII：only read input + pop for sub features
-            with st.popover("📝 Edit SII (Click to calculate)", use_container_width=True):
-                st.markdown("### SII Sub-indicators")
-                # display SII Sub-indicators
-                sii_info = COMPOSITE_INDICATORS["SII"]
-                for i, (sub_feat, default_val) in enumerate(zip(sii_info["sub_features"], sii_info["default_values"])):
-                    key = f"SII_{sub_feat}_value"
-                    st.number_input(
-                        f"{sub_feat}",
-                        step=0.01,
-                        key=key
-                        # on_change=calculate_composite_indicator,  # calculate automatically
-                        # args=("SII",)
-                    )
-                # button for calculte SII
-                if st.button("Calculate SII", key="calc_sii"):
-                    calculate_composite_indicator("SII")
-                    st.success(f"SII calculated successfully: {st.session_state['SII_value']}")
-    
-            # display SII res-only read
-            SII = st.text_input(
-                "SII",
-                value=str(st.session_state["SII_value"]),
-                disabled=True,
-                help="Click the 'Edit SII' popover to calculate via sub-indicators"
-            )
-        with col2_row2:
-            with st.popover("📝 Edit NLR (Click to calculate)", use_container_width=True):
-                st.markdown("### NLR Sub-indicators")
-                nlr_info = COMPOSITE_INDICATORS["NLR"]
-                for i, (sub_feat, default_val) in enumerate(zip(nlr_info["sub_features"], nlr_info["default_values"])):
-                    key = f"NLR_{sub_feat}_value"
-                    st.number_input(
-                        f"{sub_feat}",
-                        step=0.01,
-                        key=key,
-                        on_change=calculate_composite_indicator,
-                        args=("NLR",)
-                    )
-                if st.button("Calculate NLR", key="calc_nlr"):
-                    calculate_composite_indicator("NLR")
-                    st.success(f"NLR calculated successfully: {st.session_state['NLR_value']}")
-            
-            
-            NLR = st.text_input(
-                "NLR",
-                value=str(st.session_state["NLR_value"]),
-                disabled=True,
-                help="Click the 'Edit NLR' popover to calculate via sub-indicators"
-            )
-        with col3_row2:
-            with st.popover("📝 Edit NAR (Click to calculate)", use_container_width=True):
-                st.markdown("### NAR Sub-indicators")
-                nar_info = COMPOSITE_INDICATORS["NAR"]
-                for i, (sub_feat, default_val) in enumerate(zip(nar_info["sub_features"], nar_info["default_values"])):
-                    key = f"NAR_{sub_feat}_value"
-                    st.number_input(
-                        f"{sub_feat}",
-                        step=0.01,
-                        key=key,
-                        on_change=calculate_composite_indicator,
-                        args=("NAR",)
-                    )
-                if st.button("Calculate NAR", key="calc_nar"):
-                    calculate_composite_indicator("NAR")
-                    st.success(f"NAR calculated successfully: {st.session_state['NAR_value']}")
-            
-            NAR = st.text_input(
-                "NAR",
-                value=str(st.session_state["NAR_value"]),
-                disabled=True,
-                help="Click the 'Edit NAR' popover to calculate via sub-indicators"
-            )
-        with col4_row2:
-            with st.popover("📝 Edit MLR (Click to calculate)", use_container_width=True):
-                st.markdown("### MLR Sub-indicators")
-                mlr_info = COMPOSITE_INDICATORS["MLR"]
-                for i, (sub_feat, default_val) in enumerate(zip(mlr_info["sub_features"], mlr_info["default_values"])):
-                    key = f"MLR_{sub_feat}_value"
-                    st.number_input(
-                        f"{sub_feat}",
-                        step=0.01,
-                        key=key,
-                        on_change=calculate_composite_indicator,
-                        args=("MLR",)
-                    )
-                if st.button("Calculate MLR", key="calc_mlr"):
-                    calculate_composite_indicator("MLR")
-                    st.success(f"MLR calculated successfully: {st.session_state['MLR_value']}")
-            
-            MLR = st.text_input(
-                "MLR",
-                value=str(st.session_state["MLR_value"]),
-                disabled=True,
-                help="Click the 'Edit MLR' popover to calculate via sub-indicators"
-            )
-        with col5_row2:
-            with st.popover("📝 Edit APAR (Click to calculate)", use_container_width=True):
-                st.markdown("### APAR Sub-indicators")
-                apar_info = COMPOSITE_INDICATORS["APAR"]
-                for i, (sub_feat, default_val) in enumerate(zip(apar_info["sub_features"], apar_info["default_values"])):
-                    key = f"APAR_{sub_feat}_value"
-                    st.number_input(
-                        f"{sub_feat}",
-                        step=1,
-                        key=key,
-                        on_change=calculate_composite_indicator,
-                        args=("APAR",)
-                    )
-                if st.button("Calculate APAR", key="calc_apar"):
-                    calculate_composite_indicator("APAR")
-                    st.success(f"APAR calculated successfully: {st.session_state['APAR_value']}")
-            
-            APAR = st.text_input(
-                "APAR",
-                value=str(st.session_state["APAR_value"]),
-                disabled=True,
-                help="Click the 'Edit APAR' popover to calculate via sub-indicators"
-            )
+        # ---- Row 2: 6 composite indicators (SII, NLR, PLR, NAR, MLR, APAR) ----
+        d1, d2, d3, d4, d5, d6 = st.columns(6)
+        SII = render_composite_popover("SII", d1)
+        NLR = render_composite_popover("NLR", d2)
+        PLR = render_composite_popover("PLR", d3)
+        NAR = render_composite_popover("NAR", d4)
+        MLR = render_composite_popover("MLR", d5)
+        APAR = render_composite_popover("APAR", d6)
 
     inputs = {
-            'admission_age': float(age),
-            'sofa': float(sofa),
-            'SII': float(SII),
-            'NLR': float(NLR),
-            'NAR': float(NAR),
-            'MLR': float(MLR),
-            'APAR': float(APAR),
-            'creatinine': float(Creatinine),
-            'bun': float(Bun),
-            'pt': float(Pt)
-        }
+        'admission_age': float(age),
+        'sofa': float(sofa),
+        'SII': float(SII),
+        'NLR': float(NLR),
+        'PLR': float(PLR),
+        'NAR': float(NAR),
+        'MLR': float(MLR),
+        'APAR': float(APAR),
+        'creatinine': float(Creatinine),
+        'bun': float(Bun),
+        'pt': float(Pt)
+    }
 
     input_df = prepare_input_data(pd.DataFrame([inputs]), scaler)
 
@@ -403,13 +376,9 @@ def main():
                     raise ValueError("Input data contains invalid values")
 
                 risk = make_prediction(model, input_df)
-
                 status.update(label="Analysis complete", state="complete")
 
-
-                # create one row
                 col1 = st.columns(1)[0]
-
                 with col1:
                     st.subheader("Risk Assessment Result")
                     st.metric("Probability of Mortality", f"{risk * 100:.1f}%")
