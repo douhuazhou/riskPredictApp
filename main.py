@@ -9,8 +9,6 @@ import tempfile
 from typing import Tuple, Any
 from sklearn.preprocessing import StandardScaler
 from streamlit.components.v1 import html as st_html
-from catboost import CatBoostClassifier
-import time
 
 # Type definitions
 SklearnModel = Any  # 兼容 RandomForest / CatBoost 等多种模型
