@@ -368,27 +368,30 @@ def main():
     input_df = prepare_input_data(pd.DataFrame([inputs]), scaler)
 
     if st.button("Start Risk Assessment", type="primary"):
-        with st.status("Analyzing...", expanded=True) as status:
-            try:
+        try:
+            # 只在 status 里做"计算过程"的进度反馈，结果本身放在外面
+            with st.status("Analyzing...", expanded=True) as status:
                 if input_df.isnull().any().any():
                     raise ValueError("Input data contains invalid values")
 
+                st.write("Running model prediction...")
                 risk = make_prediction(model, input_df)
-                status.update(label="Analysis complete", state="complete")
 
-                col1 = st.columns(1)[0]
-                with col1:
-                    st.subheader("Risk Assessment Result")
-                    st.metric("Probability of Mortality", f"{risk * 100:.1f}%")
+                st.write("Computing SHAP explanations...")
+                html_content = generate_shap_plot(model, input_df)
 
-                    st.subheader("Key Influencing Factors")
-                    html_content = generate_shap_plot(model, input_df)
-                    st_html(html_content, height=600, scrolling=False)
+                status.update(label="Analysis complete", state="complete", expanded=False)
 
-            except Exception as e:
-                print(str(e))
-                status.update(label="Analysis failed", state="error")
-                st.error(f"Error: {str(e)}")
+            # 结果放在 status 之外 —— 不会被任何 Streamlit 版本的折叠行为影响
+            st.subheader("Risk Assessment Result")
+            st.metric("Probability of Mortality", f"{risk * 100:.1f}%")
+
+            st.subheader("Key Influencing Factors")
+            st_html(html_content, height=600, scrolling=False)
+
+        except Exception as e:
+            print(str(e))
+            st.error(f"Error: {str(e)}")
 
 
 if __name__ == "__main__":
