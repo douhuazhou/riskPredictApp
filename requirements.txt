@@ -1,7 +1,7 @@
 streamlit
-pandas
+pandas<3
 numpy<2
-scikit-learn
+scikit-learn==1.6.1
 shap
 catboost
 joblib
