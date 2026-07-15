@@ -44,6 +44,16 @@ numeric_features = [
     'NAR', 'MLR', 'APAR', 'creatinine', 'bun', 'pt'
 ]
 
+# --------- 变量显示名映射（仅用于 SHAP 图展示，不影响模型输入） ---------
+DISPLAY_NAME_MAP = {
+    'admission_age': 'Age',
+    'sofa':          'SOFA',
+    'creatinine':    'Creatinine',
+    'bun':           'BUN',
+    'pt':            'PT',
+    # 其他 6 个 (SII/NLR/PLR/NAR/MLR/APAR) 保持不变
+}
+
 # scaled background data
 background_data = pd.read_csv("background_data.csv", encoding="GBK")
 bk_data_with_features = background_data[numeric_features]
@@ -234,11 +244,16 @@ def generate_shap_plot(model: SklearnModel, input_data: pd.DataFrame) -> str:
 
         sample_data = input_data.iloc[sample_idx]
 
+        # 用显示名替换原始列名（仅影响图中标签）
+        display_feature_names = [
+            DISPLAY_NAME_MAP.get(c, c) for c in input_data.columns
+        ]
+
         fig = shap.plots.force(
             base_value=base_value,
             shap_values=sample_shap,
             features=sample_data,
-            feature_names=input_data.columns.tolist(),
+            feature_names=display_feature_names,
             matplotlib=False,
             plot_cmap="coolwarm",
             text_rotation=15,
