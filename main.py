@@ -98,25 +98,32 @@ COMPOSITE_INDICATORS = {
 # initialize Session State
 # ---------------------------
 def init_session_state():
-    # 6 个复合指标的默认值
+    # 加个版本 flag，检测到旧版 session_state（老浏览器缓存）就强制重置一次
+    # 每次改动这里的默认值/子特征结构，把 v3 递增一次
+    _INIT_FLAG = "_initialized_v3"
+    force_reset = not st.session_state.get(_INIT_FLAG)
+
+    # 用表达式动态计算复合指标默认值，避免手动写数导致的舍入误差
     defaults = {
-        "SII_value": 1445.714286,
-        "NLR_value": 3.285714286,
-        "PLR_value": 332.6076,   # 440 / 1.323
-        "NAR_value": 0.15525,
-        "MLR_value": 0.142857143,
-        "APAR_value": 1.25,
+        "SII_value": 440.0 * 4.347 / 1.323,       # Plt * Neu / Lym
+        "NLR_value": 4.347 / 1.323,               # Neu / Lym
+        "PLR_value": 440.0 / 1.323,               # Plt / Lym
+        "NAR_value": 4.347 / 28.0,                # Neu / Alb
+        "MLR_value": 0.189 / 1.323,               # Mono / Lym
+        "APAR_value": 35 / 28,                    # Alp / Alb
     }
     for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+        if force_reset or k not in st.session_state:
+            st.session_state[k] = round(v, 4)
 
     # 子特征
     for indicator, info in COMPOSITE_INDICATORS.items():
         for sub_feat, default_val in zip(info["sub_features"], info["default_values"]):
             key = f"{indicator}_{sub_feat}_value"
-            if key not in st.session_state:
+            if force_reset or key not in st.session_state:
                 st.session_state[key] = default_val
+
+    st.session_state[_INIT_FLAG] = True
 
 
 init_session_state()
@@ -257,7 +264,8 @@ def generate_shap_plot(model: SklearnModel, input_data: pd.DataFrame) -> str:
             matplotlib=False,
             plot_cmap="coolwarm",
             text_rotation=15,
-            figsize=(12, 6)
+            figsize=(12, 6),
+            contribution_threshold=0.0,   # 显示全部特征（默认 0.05 会隐藏贡献 <5% 的特征）
         )
 
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False)
@@ -301,7 +309,7 @@ def calculate_composite_indicator(indicator_name: str) -> None:
         key = f"{indicator_name}_{sub_feat}_value"
         sub_values.append(st.session_state[key])
     composite_value = info["formula"](*sub_values)
-    st.session_state[f"{indicator_name}_value"] = round(composite_value, 2)
+    st.session_state[f"{indicator_name}_value"] = round(composite_value, 4)
 
 
 def render_composite_popover(indicator: str, container):
@@ -347,7 +355,7 @@ def main():
         # ---- Row 1: 5 basic features ----
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
-            age = st.number_input("Age", value=50.09, format="%.2f")
+            age = st.number_input("Age", value=50.087269, format="%.2f")
         with c2:
             sofa = st.number_input("SOFA", value=13.0, format="%.2f")
         with c3:
