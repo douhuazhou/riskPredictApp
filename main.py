@@ -375,9 +375,9 @@ def main():
         with c3:
             Creatinine = st.number_input("Creatinine", value=1.3, format="%.2f")
         with c4:
-            Bun = st.number_input("Bun", value=17.0, format="%.2f")
+            Bun = st.number_input("BUN", value=17.0, format="%.2f")
         with c5:
-            Pt = st.number_input("Pt", value=12.5, format="%.2f")
+            Pt = st.number_input("PT", value=12.5, format="%.2f")
 
         # ---- Row 2: 6 composite indicators (SII, NLR, PLR, NAR, MLR, APAR) ----
         d1, d2, d3, d4, d5, d6 = st.columns(6)
