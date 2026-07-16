@@ -98,30 +98,29 @@ COMPOSITE_INDICATORS = {
 # initialize Session State
 # ---------------------------
 def init_session_state():
-    # 加个版本 flag，检测到旧版 session_state（老浏览器缓存）就强制重置一次
-    # 每次改动这里的默认值/子特征结构，把 v3 递增一次
-    _INIT_FLAG = "_initialized_v3"
+    # 版本 flag：改动默认值或子特征结构时递增
+    _INIT_FLAG = "_initialized_v5"
     force_reset = not st.session_state.get(_INIT_FLAG)
 
-    # 用表达式动态计算复合指标默认值，避免手动写数导致的舍入误差
+    # 复合指标默认值（用表达式避免手动写数导致的舍入误差）
     defaults = {
         "SII_value": 440.0 * 4.347 / 1.323,       # Plt * Neu / Lym
         "NLR_value": 4.347 / 1.323,               # Neu / Lym
         "PLR_value": 440.0 / 1.323,               # Plt / Lym
         "NAR_value": 4.347 / 28.0,                # Neu / Alb
         "MLR_value": 0.189 / 1.323,               # Mono / Lym
-        "APAR_value": 35 / 28,                    # Alp / Alb
+        "APAR_value": 35.0 / 28.0,                # Alp / Alb
     }
     for k, v in defaults.items():
         if force_reset or k not in st.session_state:
-            st.session_state[k] = round(v, 4)
+            st.session_state[k] = float(round(v, 4))
 
     # 子特征
     for indicator, info in COMPOSITE_INDICATORS.items():
         for sub_feat, default_val in zip(info["sub_features"], info["default_values"]):
             key = f"{indicator}_{sub_feat}_value"
             if force_reset or key not in st.session_state:
-                st.session_state[key] = default_val
+                st.session_state[key] = float(default_val)
 
     st.session_state[_INIT_FLAG] = True
 
@@ -305,25 +304,40 @@ def calculate_composite_indicator(indicator_name: str) -> None:
         return
     info = COMPOSITE_INDICATORS[indicator_name]
     sub_values = []
-    for sub_feat in info["sub_features"]:
+    for i, sub_feat in enumerate(info["sub_features"]):
         key = f"{indicator_name}_{sub_feat}_value"
-        sub_values.append(st.session_state[key])
+        # 用默认值兜底，防止 session_state 尚未初始化时 KeyError
+        default_val = info["default_values"][i]
+        val = st.session_state.get(key, default_val)
+        sub_values.append(float(val))
     composite_value = info["formula"](*sub_values)
     st.session_state[f"{indicator_name}_value"] = round(composite_value, 4)
 
 
 def render_composite_popover(indicator: str, container):
     """通用复合指标 popover 组件"""
+    info = COMPOSITE_INDICATORS[indicator]
+
+    # 兜底：确保当前指标下所有子特征在 session_state 里都有值
+    for sub_feat, default_val in zip(info["sub_features"], info["default_values"]):
+        key = f"{indicator}_{sub_feat}_value"
+        if key not in st.session_state:
+            st.session_state[key] = float(default_val)
+    if f"{indicator}_value" not in st.session_state:
+        st.session_state[f"{indicator}_value"] = float(
+            info["formula"](*info["default_values"])
+        )
+
     with container:
         # 所有按钮统一为短标签 "📝 Edit XXX"，宽度一致 → 1 行不换行
         with st.popover(f"📝 Edit {indicator}", use_container_width=True):
             st.markdown(f"### {indicator} Sub-indicators")
-            info = COMPOSITE_INDICATORS[indicator]
             for sub_feat, default_val in zip(info["sub_features"], info["default_values"]):
                 key = f"{indicator}_{sub_feat}_value"
                 st.number_input(
                     f"{sub_feat}",
                     step=0.01,
+                    format="%.4f",
                     key=key,
                     on_change=calculate_composite_indicator,
                     args=(indicator,)
