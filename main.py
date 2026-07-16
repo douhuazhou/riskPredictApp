@@ -339,16 +339,21 @@ def render_composite_popover(indicator: str, container):
             sub_vals = []
             for sub_feat, default_val in zip(info["sub_features"], info["default_values"]):
                 stored_key = f"{indicator}_{sub_feat}_value"
-                # 显式用我们的 session_state 值作为初始值（不用 widget key）
+                # 我们自己的存储 key —— 数据的真实来源，Streamlit 不会自动清理
                 stored = float(st.session_state.get(stored_key, default_val))
+
+                # widget 的 key —— 只为消除自动 ID 冲突（跨 popover 的重复 label）
+                # 即使这个 key 被 Streamlit 在 popover 折叠时清掉也没关系，
+                # 因为下次 render 我们用 value=stored 重新填入正确值
+                widget_key = f"widget_{stored_key}"
                 v = st.number_input(
                     f"{sub_feat}",
                     value=stored,
                     step=0.01,
                     format="%.4f",
-                    # 关键：不传 key → 避免 Streamlit 自动清理 widget state
+                    key=widget_key,
                 )
-                # 用户改完 → 手动持久化到我们自己的 key
+                # 用户改完 → 手动持久化到我们自己的存储 key
                 st.session_state[stored_key] = float(v)
                 sub_vals.append(float(v))
 
