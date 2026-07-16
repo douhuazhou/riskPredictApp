@@ -300,13 +300,13 @@ def generate_shap_plot(model: SklearnModel, input_data: pd.DataFrame) -> str:
 
 
 def calculate_composite_indicator(indicator_name: str) -> None:
+    """（保留供外部调用，但内部渲染已改为实时计算）"""
     if indicator_name not in COMPOSITE_INDICATORS:
         return
     info = COMPOSITE_INDICATORS[indicator_name]
     sub_values = []
     for i, sub_feat in enumerate(info["sub_features"]):
         key = f"{indicator_name}_{sub_feat}_value"
-        # 用默认值兜底，防止 session_state 尚未初始化时 KeyError
         default_val = info["default_values"][i]
         val = st.session_state.get(key, default_val)
         sub_values.append(float(val))
@@ -315,46 +315,58 @@ def calculate_composite_indicator(indicator_name: str) -> None:
 
 
 def render_composite_popover(indicator: str, container):
-    """通用复合指标 popover 组件"""
+    """通用复合指标 popover 组件。
+
+    重要设计：sub-feature 的 st.number_input **不使用 key 参数**，
+    完全由我们自己的 session_state[stored_key] 管理状态。
+    避免 Streamlit widget 生命周期自动清理 key 导致的 0 值偶发问题。
+    """
     info = COMPOSITE_INDICATORS[indicator]
 
     # 兜底：确保当前指标下所有子特征在 session_state 里都有值
     for sub_feat, default_val in zip(info["sub_features"], info["default_values"]):
-        key = f"{indicator}_{sub_feat}_value"
-        if key not in st.session_state:
-            st.session_state[key] = float(default_val)
+        stored_key = f"{indicator}_{sub_feat}_value"
+        if stored_key not in st.session_state:
+            st.session_state[stored_key] = float(default_val)
     if f"{indicator}_value" not in st.session_state:
         st.session_state[f"{indicator}_value"] = float(
             info["formula"](*info["default_values"])
         )
 
     with container:
-        # 所有按钮统一为短标签 "📝 Edit XXX"，宽度一致 → 1 行不换行
         with st.popover(f"📝 Edit {indicator}", use_container_width=True):
             st.markdown(f"### {indicator} Sub-indicators")
+            sub_vals = []
             for sub_feat, default_val in zip(info["sub_features"], info["default_values"]):
-                key = f"{indicator}_{sub_feat}_value"
-                st.number_input(
+                stored_key = f"{indicator}_{sub_feat}_value"
+                # 显式用我们的 session_state 值作为初始值（不用 widget key）
+                stored = float(st.session_state.get(stored_key, default_val))
+                v = st.number_input(
                     f"{sub_feat}",
+                    value=stored,
                     step=0.01,
                     format="%.4f",
-                    key=key,
-                    on_change=calculate_composite_indicator,
-                    args=(indicator,)
+                    # 关键：不传 key → 避免 Streamlit 自动清理 widget state
                 )
-            if st.button(f"Calculate {indicator}", key=f"calc_{indicator.lower()}"):
-                calculate_composite_indicator(indicator)
-                st.success(f"{indicator} = {st.session_state[f'{indicator}_value']}")
+                # 用户改完 → 手动持久化到我们自己的 key
+                st.session_state[stored_key] = float(v)
+                sub_vals.append(float(v))
 
-        # 用真正的 Streamlit widget（不设 key，只传 value）：
-        # - 没 key -> 不走 session_state 缓存 -> 每次 rerun 都用最新的 value 刷新
-        # - 是真正的 widget -> Streamlit 能测量高度 -> 不会与下方按钮重叠
-        val = str(st.session_state[f"{indicator}_value"])
+            # 实时计算复合指标（不需要点按钮）
+            try:
+                composite_value = info["formula"](*sub_vals)
+            except ZeroDivisionError:
+                composite_value = 0.0
+            st.session_state[f"{indicator}_value"] = round(float(composite_value), 4)
+            st.info(f"{indicator} = {st.session_state[f'{indicator}_value']}")
+
+        # 展示当前复合值（真 widget，能被 Streamlit 布局引擎测量高度）
+        val = f"{st.session_state[f'{indicator}_value']}"
         st.text_input(
             label=f"{indicator}",
             value=val,
             disabled=True,
-            help=f"Click 'Edit {indicator}' popover to recalculate",
+            help=f"Click 'Edit {indicator}' popover to modify sub-indicators",
         )
         return val
 
